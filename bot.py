@@ -34,7 +34,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -302,7 +302,24 @@ WELCOME = (
 )
 
 
+async def _redirect_to_dm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, label: str, payload: str = ""
+) -> None:
+    """In a non-private chat, nudge the user to open the bot in a DM instead of
+    running a multi-step flow publicly in the group."""
+    url = f"https://t.me/{context.bot.username}"
+    if payload:
+        url += f"?start={payload}"
+    await update.message.reply_text(
+        "👋 Let's keep this private — tap below to open me in a DM.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(label, url=url)]]),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await _redirect_to_dm(update, context, "➕ Set up in private", payload="onboard")
+        return ConversationHandler.END
     user = update.effective_user
     context.user_data.clear()
     context.user_data["tg_id"] = user.id
@@ -442,6 +459,9 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 #  /update  — edit one field
 # --------------------------------------------------------------------------- #
 async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await _redirect_to_dm(update, context, "✏️ Update in private")
+        return ConversationHandler.END
     tg_id = update.effective_user.id
     entry = sheet().get_entry(tg_id)
     if not entry:
