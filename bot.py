@@ -20,6 +20,7 @@ All secrets come from environment variables. Nothing sensitive is in this file.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -735,15 +736,17 @@ async def members_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("No one's shared an Instagram yet.")
         return
     pairs.sort(key=lambda p: p[0].lower())
-    lines = ["*BASE — follow each other on IG* 📷\n"]
+    # HTML (not Markdown) so handles with underscores/dots link reliably.
+    lines = ["<b>BASE — follow each other on IG</b> 📷\n"]
     for name, ig in pairs:
-        handle = ig.lstrip("@")
-        lines.append(f"• {_md(name)} — [@{handle}](https://instagram.com/{handle})")
+        handle = html.escape(ig.lstrip("@"))
+        url = f"https://instagram.com/{handle}"
+        lines.append(f'• {html.escape(name)} — <a href="{url}">instagram.com/{handle}</a>')
     text = "\n".join(lines)
     # Telegram messages cap at 4096 chars; chunk if needed
     for chunk in _chunks(text, 3900):
         await update.message.reply_text(
-            chunk, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True
+            chunk, parse_mode=ParseMode.HTML, disable_web_page_preview=True
         )
 
 
