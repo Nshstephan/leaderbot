@@ -1,0 +1,11 @@
+# NEVER commit secrets
+.env
+*.json
+credentials*
+service-account*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
