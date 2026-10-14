@@ -75,6 +75,7 @@ LIFTS = [
 LIFT_BY_KEY = {l["key"]: l for l in LIFTS}
 
 MIN_ENTRIES_TO_SHOW = 3  # a board stays hidden until it has at least this many entries
+BW_MIN, BW_MAX = 30, 250  # accepted bodyweight range in kg (rejects 0 and typos like 780)
 
 # Public sheet columns, in order
 BOARD_HEADERS = (
@@ -253,6 +254,15 @@ def parse_number(text: str) -> float | None:
         return None
 
 
+BW_ERROR = f"Bodyweight should be {BW_MIN}–{BW_MAX} kg — just the number, e.g. 78"
+
+
+def parse_bodyweight(text: str) -> float | None:
+    """parse_number, restricted to a realistic bodyweight range."""
+    n = parse_number(text)
+    return n if n is not None and BW_MIN <= n <= BW_MAX else None
+
+
 def admin_ids() -> set[int]:
     raw = os.environ.get("ADMIN_IDS", "")
     out = set()
@@ -361,9 +371,9 @@ async def got_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def got_bodyweight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    n = parse_number(update.message.text)
+    n = parse_bodyweight(update.message.text)
     if n is None:
-        await update.message.reply_text("Just the number please — like 78")
+        await update.message.reply_text(BW_ERROR)
         return BODYWEIGHT
     context.user_data["bodyweight"] = n
     context.user_data["_lift_idx"] = 0
@@ -538,16 +548,19 @@ async def update_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             context.user_data["instagram"] = ""
         else:
             context.user_data["instagram"] = "@" + text.lstrip("@")[:40]
+    elif field == "bodyweight":
+        n = parse_bodyweight(text)
+        if n is None:
+            await update.message.reply_text(BW_ERROR)
+            return UPDATE_VALUE
+        context.user_data["bodyweight"] = n
     else:
         n = parse_number(text)
         if n is None:
             await update.message.reply_text("Just the number please.")
             return UPDATE_VALUE
-        if field == "bodyweight":
-            context.user_data["bodyweight"] = n
-        else:
-            lift = LIFT_BY_KEY[field]
-            context.user_data[field] = int(n) if lift["unit"] == "reps" else n
+        lift = LIFT_BY_KEY[field]
+        context.user_data[field] = int(n) if lift["unit"] == "reps" else n
 
     try:
         sheet().upsert(dict(context.user_data))
@@ -575,9 +588,19 @@ async def leaderboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def _pct_of_bw(added: float, bw) -> float | None:
+    """Added weight as a % of bodyweight, or None if bodyweight is missing/zero."""
+    try:
+        bw = float(bw)
+    except (TypeError, ValueError):
+        return None
+    return added / bw * 100 if bw > 0 else None
+
+
 def _ranked_for(lift: dict) -> list[dict]:
     """Read the board and return every entry with a numeric value for this lift,
-    sorted high → low. Shared by the top-10 and full-board views."""
+    sorted high → low. On added-weight boards, exact ties go to the higher
+    % of bodyweight (the lighter lifter). Shared by both board views."""
     ranked = []
     for r in sheet().all_rows():
         raw = r.get(lift["header"], "")
@@ -585,13 +608,19 @@ def _ranked_for(lift: dict) -> list[dict]:
             val = float(raw)
         except (TypeError, ValueError):
             continue
+        bw = r.get("Bodyweight (kg)", "")
         ranked.append({
             "id": str(r.get("Telegram ID", "")),
             "name": str(r.get("Display name", "")).strip() or "—",
-            "bw": r.get("Bodyweight (kg)", ""),
+            "bw": bw,
             "val": val,
+            "pct": _pct_of_bw(val, bw) if lift["unit"] == "kg" else None,
         })
-    ranked.sort(key=lambda x: x["val"], reverse=True)
+    # no bodyweight → pct is None → loses any tie
+    ranked.sort(
+        key=lambda x: (x["val"], x["pct"] if x["pct"] is not None else -1),
+        reverse=True,
+    )
     return ranked
 
 
@@ -624,49 +653,74 @@ async def board_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def _name_width(lift: dict) -> int:
+    # The %BW column costs width, so names are tighter on added-weight boards
+    # to keep rows from wrapping on phones.
+    return 12 if lift["unit"] == "kg" else 14
+
+
+def _board_header(lift: dict) -> str:
+    header = f"{'#':>2}  {'ATHLETE':<{_name_width(lift)}}{'BW':>5}  {'BEST':>6}"
+    if lift["unit"] == "kg":
+        header += f"  {'%BW':>4}"
+    return header
+
+
+def _board_row(lift: dict, rank: int, e: dict, viewer_id: str) -> str:
+    """One monospace board line. Shared by the top-10 and full-board views."""
+    w = _name_width(lift)
+    name = (e["name"][:w - 1] + "…") if len(e["name"]) > w else e["name"]
+    bw = f"{e['bw']}" if e["bw"] != "" else "—"
+    best = f"{int(e['val'])}" if lift["unit"] == "reps" else f"{e['val']:g}"
+    # emoji renders ~2 cols wide, so use one less space to keep alignment
+    rank_cell = f"{MEDALS[rank]} " if rank in MEDALS else f"{rank:>2} "
+    row = f"{rank_cell} {name:<{w}}{bw:>5}  {best:>6}"
+    if lift["unit"] == "kg":
+        pct = f"{e['pct']:.0f}%" if e["pct"] is not None else "—"
+        row += f"  {pct:>4}"
+    if e["id"] == viewer_id:
+        row += "  ← you"
+    return row
+
+
+def _board_footer(lift: dict) -> str:
+    lines = []
+    if lift["unit"] == "kg":
+        lines.append("_%BW = added weight as % of bodyweight. Ties go to the lighter lifter._")
+    lines.append("_Update yours: /update_")
+    return "\n".join(lines)
+
+
 def render_board(lift: dict, ranked: list[dict], viewer_id: str) -> str:
     """Monospace leaderboard. Top 10 + the viewer's own line if outside top 10."""
-    unit = "" if lift["unit"] == "reps" else ""
-    fmt = (lambda v: f"{int(v)}") if lift["unit"] == "reps" else (lambda v: f"{v:g}")
-
-    title = f"🦍 BASE — {lift['label']}"
-    header = f"{'#':>2}  {'ATHLETE':<14}{'BW':>5}  {'BEST':>6}"
-    sep = "─" * len(header)
-    lines = [f"```\n{title}\n\n{header}\n{sep}"]
-
-    viewer_rank = None
-    for i, e in enumerate(ranked, start=1):
-        if e["id"] == viewer_id:
-            viewer_rank = i
-
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    header = _board_header(lift)
+    lines = [f"```\n🦍 BASE — {lift['label']}\n\n{header}\n{'─' * len(header)}"]
     for i, e in enumerate(ranked[:10], start=1):
-        name = (e["name"][:13] + "…") if len(e["name"]) > 14 else e["name"]
-        bw = f"{e['bw']}" if e["bw"] != "" else "—"
-        you = "  ← you" if e["id"] == viewer_id else ""
-        if i in medals:
-            # emoji renders ~2 cols wide, so use one less space to keep alignment
-            rank_cell = f"{medals[i]} "
-        else:
-            rank_cell = f"{i:>2} "
-        lines.append(f"{rank_cell} {name:<14}{bw:>5}  {fmt(e['val']):>6}{you}")
+        lines.append(_board_row(lift, i, e, viewer_id))
 
-    # viewer outside the top 10 — append their line + gap to next
+    # viewer outside the top 10 — append their line + gap to the next spot
+    viewer_rank = next(
+        (i for i, e in enumerate(ranked, start=1) if e["id"] == viewer_id), None
+    )
     if viewer_rank and viewer_rank > 10:
-        me = ranked[viewer_rank - 1]
-        above = ranked[viewer_rank - 2]
-        gap = above["val"] - me["val"]
-        gap_txt = f"{gap:g}" if lift["unit"] == "kg" else f"{int(gap)}"
+        me, above = ranked[viewer_rank - 1], ranked[viewer_rank - 2]
         lines.append("…")
-        lines.append(
-            f"{viewer_rank:>2}  {me['name'][:14]:<14}"
-            f"{me['bw']:>5}  {fmt(me['val']):>6}  ← you"
-        )
-        unit_word = "kg" if lift["unit"] == "kg" else "reps"
-        lines.append(f"\n{gap_txt} {unit_word} off #{viewer_rank - 1}.")
+        lines.append(_board_row(lift, viewer_rank, me, viewer_id))
+        gap = above["val"] - me["val"]
+        if gap:
+            unit_word = "kg" if lift["unit"] == "kg" else "reps"
+            gap_txt = f"{gap:g}" if lift["unit"] == "kg" else f"{int(gap)}"
+            lines.append(f"\n{gap_txt} {unit_word} off #{viewer_rank - 1}.")
+        elif lift["unit"] == "kg":
+            lines.append(f"\nTied on kg with #{viewer_rank - 1}, lighter lifter wins the tie.")
+        else:
+            lines.append(f"\nTied with #{viewer_rank - 1}.")
 
     lines.append("```")
-    lines.append("\n_Update yours: /update_")
+    lines.append("\n" + _board_footer(lift))
     return "\n".join(lines)
 
 
@@ -694,19 +748,10 @@ async def board_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 def render_full_board(lift: dict, ranked: list[dict], viewer_id: str) -> list[str]:
     """The complete ranking as a list of monospace messages, each a self-contained
     code block kept under Telegram's 4096-char cap. Header repeats on every page."""
-    fmt = (lambda v: f"{int(v)}") if lift["unit"] == "reps" else (lambda v: f"{v:g}")
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    header = f"{'#':>2}  {'ATHLETE':<14}{'BW':>5}  {'BEST':>6}"
+    header = _board_header(lift)
     sep = "─" * len(header)
     title = f"🦍 BASE — {lift['label']}  ·  {len(ranked)} athletes"
-
-    row_lines = []
-    for i, e in enumerate(ranked, start=1):
-        name = (e["name"][:13] + "…") if len(e["name"]) > 14 else e["name"]
-        bw = f"{e['bw']}" if e["bw"] != "" else "—"
-        you = "  ← you" if e["id"] == viewer_id else ""
-        rank_cell = f"{medals[i]} " if i in medals else f"{i:>2} "
-        row_lines.append(f"{rank_cell} {name:<14}{bw:>5}  {fmt(e['val']):>6}{you}")
+    row_lines = [_board_row(lift, i, e, viewer_id) for i, e in enumerate(ranked, start=1)]
 
     LIMIT = 3500  # headroom under Telegram's 4096 hard cap
     messages: list[str] = []
@@ -723,7 +768,7 @@ def render_full_board(lift: dict, ranked: list[dict], viewer_id: str) -> list[st
             i += 1
         messages.append(f"```\n{body}\n```")
         first = False
-    messages[-1] += "\n\n_Update yours: /update_"
+    messages[-1] += "\n\n" + _board_footer(lift)
     return messages
 
 
