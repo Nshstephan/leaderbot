@@ -23,16 +23,8 @@ You only do this once. Take it slow; each step is copy-paste.
 4. BotFather replies with a line like:
    `Use this token to access the HTTP API: 123456789:AAH...`
    **That long string is your `BOT_TOKEN`.** Copy it somewhere safe for now.
-5. Optional but nice — still in BotFather, send `/setcommands`, pick your bot,
-   and paste:
-   ```
-   start - Add yourself to the leaderboard
-   update - Update your numbers
-   leaderboard - See the rankings
-   members - Follow other members on IG
-   help - What this bot does
-   ```
-   This makes the commands show up in a menu in the chat.
+5. No need to set up the command menu in BotFather (`/setcommands`): the bot
+   publishes its own menu every time it starts, with a shorter one inside groups.
 
 ---
 
@@ -124,7 +116,7 @@ The host pulls the code from GitHub.
 
 ### 3c. Test it
 
-1. Open Telegram, find your bot, send `/start`.
+1. Open Telegram, find your bot, tap **Start** (or send `/join`).
 2. Walk through the flow. Confirm.
 3. Open your Google Sheet — your row should be in the `board` tab, and your
    Telegram id + IG in the `mapping` tab.
@@ -137,8 +129,9 @@ That's the whole thing. Once it's running, you don't touch it again.
 
 ## Day-to-day
 
-- **Members add themselves:** they open the bot and `/start`. Put the bot link
-  in Filip's welcome DM and pin it in the chat.
+- **Members add themselves:** they send `/join` (in the group, the bot hands them
+  a button to finish in a DM), or open the bot and tap **Start**. Put the bot
+  link in Filip's welcome DM and pin it in the chat.
 - **Members log a PR:** `/update`, tap the field, type the number.
 - **Show the board:** anyone sends `/leaderboard`. You can also paste a board
   into the chat yourself and pin it.

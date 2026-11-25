@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -304,7 +306,7 @@ def _md(text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  /start  — onboarding conversation
+#  /join (or /start in a DM)  — onboarding conversation
 # --------------------------------------------------------------------------- #
 WELCOME = (
     "🦍 *Welcome to the BASE leaderboard.*\n\n"
@@ -444,7 +446,7 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     if query.data == "confirm_restart":
-        await query.edit_message_text("No problem — send /start to go again.")
+        await query.edit_message_text("No problem — send /join to go again.")
         return ConversationHandler.END
 
     # save
@@ -453,7 +455,7 @@ async def on_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception as e:  # noqa: BLE001
         log.exception("save failed")
         await query.edit_message_text(
-            "Something went wrong saving your entry. Please try /start again in a moment."
+            "Something went wrong saving your entry. Please try /join again in a moment."
         )
         return ConversationHandler.END
 
@@ -477,7 +479,7 @@ async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     entry = sheet().get_entry(tg_id)
     if not entry:
         await update.message.reply_text(
-            "You're not on the board yet — send /start to add yourself first."
+            "You're not on the board yet — send /join to add yourself first."
         )
         return ConversationHandler.END
 
@@ -635,7 +637,7 @@ async def board_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if len(ranked) < MIN_ENTRIES_TO_SHOW:
         await query.edit_message_text(
             f"*{lift['label']}*\n\nNot enough entries yet "
-            f"({len(ranked)}/{MIN_ENTRIES_TO_SHOW}). Be one of the first — /start",
+            f"({len(ranked)}/{MIN_ENTRIES_TO_SHOW}). Be one of the first — /join",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -735,7 +737,7 @@ async def board_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     ranked = _ranked_for(lift)
     if not ranked:
-        await query.edit_message_text("No entries yet — /start to be the first.")
+        await query.edit_message_text("No entries yet — /join to be the first.")
         return
 
     messages = render_full_board(lift, ranked, viewer_id)
@@ -820,7 +822,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "🦍 *BASE leaderboard*\n\n"
-        "/start — add yourself to the board\n"
+        "/join — add yourself to the board\n"
         "/update — change a number or your details\n"
         "/leaderboard — see the rankings\n"
         "/members — follow other members on IG\n",
@@ -828,12 +830,44 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# Command menus. DMs get everything; the group menu skips /help, which only
+# answers in DMs (like /start) so it doesn't pile onto other bots' replies.
+PRIVATE_COMMANDS = [
+    BotCommand("join", "Add yourself to the leaderboard"),
+    BotCommand("update", "Log a new PR or change your details"),
+    BotCommand("leaderboard", "See the rankings"),
+    BotCommand("members", "Follow other members on Instagram"),
+    BotCommand("help", "What this bot does"),
+]
+GROUP_COMMANDS = [
+    BotCommand("leaderboard", "See the rankings"),
+    BotCommand("members", "Follow other members on Instagram"),
+    BotCommand("join", "Add yourself to the leaderboard"),
+    BotCommand("update", "Log a new PR or change your details"),
+]
+
+
+async def _set_commands(app: Application) -> None:
+    """Publish the command menus on startup, replacing any list set in BotFather."""
+    try:
+        await app.bot.set_my_commands(PRIVATE_COMMANDS)  # default scope → DMs
+        await app.bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
+    except Exception:  # noqa: BLE001 — a stale menu shouldn't stop the bot
+        log.exception("couldn't set the command menus")
+
+
 def build_app() -> Application:
     token = os.environ["BOT_TOKEN"]
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_set_commands).build()
 
     onboarding = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("join", start),
+            # Telegram sends /start when someone first opens the bot or taps the
+            # "Set up in private" link. In groups every bot answers /start, so
+            # this one stays out of it there.
+            CommandHandler("start", start, filters=filters.ChatType.PRIVATE),
+        ],
         states={
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_name)],
             BODYWEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_bodyweight)],
@@ -859,7 +893,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(board_show, pattern="^board_"))
     app.add_handler(CallbackQueryHandler(board_full, pattern="^fullboard_"))
     app.add_handler(CommandHandler("members", members_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("help", help_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("start_help", help_cmd))
     return app
 
