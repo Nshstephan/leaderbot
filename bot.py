@@ -30,7 +30,10 @@ import gspread
 from google.oauth2.service_account import Credentials
 from telegram import (
     BotCommand,
+    BotCommandScopeAllChatAdministrators,
     BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeDefault,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -847,13 +850,26 @@ GROUP_COMMANDS = [
 ]
 
 
+# Telegram shows the most specific list that exists (DMs and group admins are
+# checked before the general one), and BotFather can save lists for those
+# scopes too. Setting every scope means an old BotFather list can't win.
+COMMAND_MENUS = [
+    (PRIVATE_COMMANDS, BotCommandScopeDefault()),
+    (PRIVATE_COMMANDS, BotCommandScopeAllPrivateChats()),
+    (GROUP_COMMANDS, BotCommandScopeAllGroupChats()),
+    (GROUP_COMMANDS, BotCommandScopeAllChatAdministrators()),
+]
+
+
 async def _set_commands(app: Application) -> None:
     """Publish the command menus on startup, replacing any list set in BotFather."""
     try:
-        await app.bot.set_my_commands(PRIVATE_COMMANDS)  # default scope → DMs
-        await app.bot.set_my_commands(GROUP_COMMANDS, scope=BotCommandScopeAllGroupChats())
+        for commands, scope in COMMAND_MENUS:
+            await app.bot.set_my_commands(commands, scope=scope)
     except Exception:  # noqa: BLE001 — a stale menu shouldn't stop the bot
         log.exception("couldn't set the command menus")
+    else:
+        log.info("command menus set (DMs, groups, group admins)")
 
 
 def build_app() -> Application:
